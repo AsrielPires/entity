@@ -33,19 +33,13 @@ declare global {
     }
     interface Entity {
       key?: string;
-      listeners?: Array<Bond>;
+      /**bonds listeners */
+      bonds?: Array<Bond>;
       react?: Array<string>;
       actions?: Array<Action>;
       fields?: Field[];
 
-      /**can select data */
-      get?: boolean;
-      /**can insert data*/
-      post?: any;
-      /**can update data*/
-      put?: any;
-      /**can delete data */
-      delete?: any;
+
       main?: string;
       icon?: string;
     }
@@ -81,16 +75,22 @@ export const $: entity.Settings = {
   limit: 50,
   id: () => "id"
 };
-export function bind(ent: Entity, bond) {
-  if (ent.listeners.includes(bond))
+export function bind(ent: Entity, bond: Bond) {
+  if ((ent.bonds ||= []).includes(bond))
     console.warn("already binded");
   else
-    ent.listeners.push(bond);
+    ent.bonds.push(bond);
   return ent;
 };
+export function unbind(ent: Entity, bond: Bond) {
+  if (ent.bonds) {
+    let i = ent.bonds.indexOf(bond);
+    (i != -1) && ent.bonds.splice(i, 1);
+  }
+}
 
-export const fieldTypes = {};
-export const ftype = ({ tp }) => fieldTypes[tp];
+export const fieldTypes: Dic<FieldType> = {};
+export const ftype = ({ tp }: Field) => fieldTypes[tp];
 export function field(ent: Entity, key: string | ((f: Field) => any)) {
   let r = ent.fields.find(isS(key) ? (f) => f.key == key : key);
   return r;
@@ -99,64 +99,56 @@ export function fields(ent: Entity, filter?: (field: Field) => any) {
   let field = filter ? ent.fields.filter(filter) : ent.fields;
   return field;
 }
-export async function initFields(fields, tp) {
+export async function initFields(fields: entity.Field[], tp: FieldActionType) {
   for (let field of fields)
     await fieldTypes[field.tp].init?.(field, tp);
   return fields;
 }
-export function reactTo(ent: Entity, target) {
+export function reactTo(ent: Entity, target: Entity) {
   (target.react ||= []).push(ent.key);
   return ent;
 }
-export function select(ent: Entity, bond = {}) {
-  if (!ent.get)
-    console.error("this entity has not insert support");
+const key = (ent: Entity | string) => isS(ent) ? ent : ent.key;
+export function select<T extends GT = "rows">(ent: Entity | string, bond: ISelect<T> = {}): Task<SelectResult[T]> {
+  return $.select(key(ent), bond);
+}
+export async function insert(ent: Entity | string, values: Arr<Rec>) {
+  let k = key(ent), result = await $.insert(k, values);
+  reload(k);
+  return result;
+}
+export async function update(ent: Entity | string, values: Arr<Rec>) {
+  let k = key(ent), result = await $.update(k, values);
+  reload(k);
+  return result;
+}
+export async function remove(ent: Entity | string, ids: Key[]) {
+  let k = key(ent), result = await $.remove(k, { id: ids });
+  reload(k);
+  return result;
+}
+async function reload(ent: string, reloaded = []) {
+  let t = await entities[ent];
+  if (t) {
+    let l = t.bonds.length, t1 = Array(l);
+    for (let i = 0; i < l; i++)
+      t1[i] = t.bonds[i].select();
+    reloaded.push(ent);
+    if (t.react)
+      for (let key of t.react)
+        !reloaded.includes(key) && reload(key, reloaded);
 
-  return $.select(isS(ent) ? ent : ent.key, bond);
-}
-
-export async function insert(ent: Entity, values: Arr<Rec>) {
-  if (!ent.post)
-    console.error("this entity has not insert support");
-  let result = await $.insert(ent.key, values);
-  await reload(ent);
-  return result;
-}
-export async function update(ent: Entity, values: Arr<Rec>) {
-  if (!ent.put)
-    console.error("this entity has not update support");
-  let result = await $.update(ent.key, values);
-  await reload(ent);
-  return result;
-}
-export async function remove(ent: Entity, ids: Key[]) {
-  if (!ent.delete)
-    console.error("this entity has not delete support");
-  let result = await $.remove(ent.key, { id: ids });
-  await reload(ent);
-  return result;
-}
-function reload(ent: Entity, reloaded = []) {
-  let l = ent.listeners.length, t1 = Array(l);
-  for (let i = 0; i < l; i++)
-    t1[i] = ent.listeners[i].select();
-  reloaded.push(ent.key);
-  ent.react?.forEach(async (key) => {
-    if (!(key in entities))
-      return;
-    if (!reloaded.includes(key))
-      reload(await entities[key], reloaded);
-  });
-  return Promise.all(t1);
+    // return Promise.all(t1);
+  }
 }
 const delay = 500;
 interface BondOptions extends ISelect {
   readOnly?: boolean;
 }
 export class Bond implements ISelect<"full">{
-  private _query;
-  private _pag;
-  private _limit;
+  private _q: string;
+  private _pag: number;
+  private _limit: number;
   private _callindex;
   list: L<Rec>;
   readOnly: boolean;
@@ -197,12 +189,12 @@ export class Bond implements ISelect<"full">{
     return this.limit ? Math.ceil(this.length / this.limit) : 1;
   }
   get query() {
-    return this._query;
+    return this._q;
   }
   set query(value) {
-    if (value != this._query) {
+    if (value != this._q) {
       this._pag = 1;
-      this._query = value;
+      this._q = value;
       this.select(delay);
     }
   }
@@ -241,7 +233,7 @@ export class Bond implements ISelect<"full">{
         query: t.query,
         queryBy: t.queryBy,
         groupBy: t.groupBy
-      });
+      }) as Task<number[]>;
     }
     else
       return this.list.map(f => f.id);
@@ -259,10 +251,13 @@ export class Bond implements ISelect<"full">{
   getFilter(key: string) {
     return isA(this.where) ? null : this.where?.[key] || null;
   }
-  removeFilter(key: string) {
+  removeFilter(filter: string) {
     let w = this.where;
-    if (w && !isA(w))
-      delete w[key];
+    if (w) if (isA(w)) {
+      let i = w.indexOf(filter);
+      (i != -1) && w.splice(i, 1);
+    } else delete w[filter];
+    this.select(delay);
     return this;
   }
   addFilter(key: string, value: Value) {
@@ -273,7 +268,9 @@ export class Bond implements ISelect<"full">{
       w = r;
     }
     // let w = isA(this.where) ? arrToDic(this.where = this.where, (v, i) => ["" + i, v]) : this.where ||= {};
-    this.getFilter(key);
+    // this.getFilter(key);
+    if (w[key] == value) return;
+      
     w[key] = value;
     this.select(delay);
     return this;
@@ -291,7 +288,7 @@ export class Bond implements ISelect<"full">{
     return this.list;
   }
   private _handlers;
-  async getAll() {
+  async getAll(): Promise<Rec<number>[]> {
     return await $.select(this.target.key, Object.assign(this.toJSON(), {
       tp: undefined,
       limit: undefined,
@@ -363,13 +360,12 @@ export function entity(key: string | IBond<any>, f?: Entity | Field[], i?: Entit
   if (f) {
     (key in entities) && console.error("alread inserted");
     isA(f) ?
-      (i ||= { get: true, post: true }).fields = f :
+      (i ||= {}).fields = f :
       i = f;
-    i.listeners ||= [];
     i.key = key;
     return entities[key] = i;
   }
   if (key in entities) return entities[key];
-  return (entities[key] = Promise.resolve($.create ? $.create(key, i) : i)).then(v => entities[key as string] = v);
+  return (entities[key] = Promise.resolve($.create ? $.create(key, i) : i)).then(v => entities[v.key = key as string] = v);
 }
 // export const entitySync = (key: string | IBond) => entities[isS(key) ? key : key.key];
