@@ -163,7 +163,8 @@ export class Bond implements ISelect<"full">{
   readonly fields: L<BField>;
   readonly tags: L<Selection>;
   where: Dic<Value> | Value[];
-  constructor(e: Entity, opts: BondOptions = {}) {
+  constructor(e: Entity, opts: BondOptions | string[] = {}) {
+    isA(opts) && (opts = { fields: opts });
     this.target = e;
     this.readOnly = opts.readOnly;
     this._limit = opts.limit == null ? $.limit : opts.limit;
@@ -270,7 +271,7 @@ export class Bond implements ISelect<"full">{
     // let w = isA(this.where) ? arrToDic(this.where = this.where, (v, i) => ["" + i, v]) : this.where ||= {};
     // this.getFilter(key);
     if (w[key] == value) return;
-      
+
     w[key] = value;
     this.select(delay);
     return this;
@@ -345,7 +346,12 @@ export class Bond implements ISelect<"full">{
     };
   }
 }
-export const createBond = async (src: IBond | string) => new Bond(await entity(src), isS(src) ? void 0 : src);
+export function createBond(src: string, fields?: string[]): Promise<Bond>;
+export function createBond(src: IBond): Promise<Bond>;
+export async function createBond(src: IBond | string, fields?: string[]) {
+  fields && (src = { key: src as string, fields });
+  return new Bond(await entity(src), isS(src) ? void 0 : src);
+}
 export interface IBond<T extends GT = "rows"> extends ISelect<T> {
   key: string;
 }
